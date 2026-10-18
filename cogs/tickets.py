@@ -11,9 +11,9 @@ from functions.utils import is_staff_member
 logger = logging.getLogger(__name__)
 
 # Идентификаторы каналов и ролей для системы заявок
-APPLICATIONS_CHANNEL_ID = 1492111042631827587
-ROLE_PENDING_ID = 1491903740012269618
-ROLE_ACCEPTED_ID = 1491904531330633889
+APPLICATIONS_CHANNEL_ID = 1561407778168377394
+ROLE_PENDING_ID = 1561176093883633695
+ROLE_ACCEPTED_ID = 1560076972854349904
 
 
 class TicketsCog(commands.Cog):
@@ -184,8 +184,7 @@ class TicketsCog(commands.Cog):
                     custom_id="modal_form",
                     style=disnake.ButtonStyle.green,
                 ),
-            ),
-            accent_colour=disnake.Colour(0x4F6653),
+            )
         )
 
         try:
