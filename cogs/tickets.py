@@ -110,6 +110,7 @@ class TicketsCog(commands.Cog):
             color=0x4F6653,
             timestamp=disnake.utils.utcnow(),
         )
+        embed.set_thumbnail(url=user.display_avatar.url)
         return embed
 
     @staticmethod
