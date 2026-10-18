@@ -383,11 +383,13 @@ class TicketsCog(commands.Cog):
                     label="Принять",
                     custom_id=f"accept_{inter.author.id}",
                     style=disnake.ButtonStyle.green,
+                    disabled=True,
                 ),
                 ui.Button(
                     label="Отклонить",
                     custom_id=f"reject_{inter.author.id}",
                     style=disnake.ButtonStyle.red,
+                    disabled=True,
                 ),
                 ui.Button(
                     label="Steam профиль",
@@ -471,27 +473,38 @@ class TicketsCog(commands.Cog):
 
         steam_btn = self._extract_steam_button(inter.message)
 
-        # 1. Взять на рассмотрение
-        if action == "check":
-            if not member:
+        # Проверка: без нажатия «Рассмотреть» нельзя принять или отклонить заявку
+        if action in ("accept", "reject"):
+            is_under_review = False
+            for comp in ui.walk_components(inter.message.components):
+                if isinstance(comp, (disnake.Button, ui.Button)):
+                    if comp.custom_id and comp.custom_id.startswith("checked_"):
+                        is_under_review = True
+                        break
+
+            if not is_under_review:
                 return await inter.response.send_message(
-                    "Пользователь не найден на сервере (возможно, покинул сервер).",
+                    "Сначала необходимо нажать кнопку «Рассмотреть», чтобы взять заявку в работу.",
                     ephemeral=True,
                 )
 
-            role_pending = guild.get_role(ROLE_PENDING_ID) or disnake.Object(id=ROLE_PENDING_ID)
-            if not any(r.id == ROLE_PENDING_ID for r in member.roles):
-                try:
-                    await member.add_roles(
-                        role_pending,
-                        reason=f"Заявка взята на рассмотрение: {inter.author}",
-                    )
-                except disnake.Forbidden:
-                    logger.warning("Нет прав для выдачи роли рассмотрения %s", ROLE_PENDING_ID)
+        # 1. Взять на рассмотрение
+        if action == "check":
+            if member:
+                role_pending = guild.get_role(ROLE_PENDING_ID) or disnake.Object(id=ROLE_PENDING_ID)
+                if not any(r.id == ROLE_PENDING_ID for r in member.roles):
+                    try:
+                        await member.add_roles(
+                            role_pending,
+                            reason=f"Заявка взята на рассмотрение: {inter.author}",
+                        )
+                    except disnake.Forbidden:
+                        logger.warning("Нет прав для выдачи роли рассмотрения %s", ROLE_PENDING_ID)
 
+            status_text = "Ожидает проверки" if member else "Ожидает проверки (пользователь покинул сервер)"
             new_embed = self._update_application_embed(
                 embed=current_embed,
-                status_text="Ожидает проверки",
+                status_text=status_text,
                 color=disnake.Color.blurple(),
                 moderator=inter.author,
             )

@@ -6,7 +6,7 @@ import os
 class StatusCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.config_file = "dbs/status_config.json"
+        self.config_file = "data/status_config.json"
         
         # Параметры по умолчанию
         self.default_config = {
