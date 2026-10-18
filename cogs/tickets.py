@@ -92,19 +92,17 @@ class TicketsCog(commands.Cog):
         time_per_day: str,
         steam_link: str,
     ) -> disnake.Embed:
-        """Создает стильный Embed для новой заявки на вступление."""
+        """Создает Embed для новой заявки на вступление."""
         embed = disnake.Embed(
-            title="📋 Заявка на вступление в клан",
+            title="Заявка на вступление",
             description=(
-                f"👤 **Кандидат:** {user.mention} (`{user.display_name}`)\n"
-                f"🆔 **ID:** `{user.id}`\n"
-                f"🌐 **Steam:** [Открыть профиль]({steam_link})\n"
-                f"📝 **Имя / Ник:** {name}\n"
-                f"🎂 **Возраст:** {age}\n"
-                f"⏰ **Часовой пояс:** {clock}\n"
-                f"⏳ **Онлайн в день:** {time_per_day}\n\n"
-                f"🛠️ **Игровые умения и навыки:**\n```\n{bio}\n```\n"
-                f"📌 **Статус:** 🟢 Активно (ожидает рассмотрения)"
+                f"**Пользователь:** {user.mention}\n"
+                f"**Имя/Прозвище:** {name}\n"
+                f"**Возраст:** {age}\n"
+                f"**Игровые умения:** {bio}\n"
+                f"**Часовой пояс:** {clock}\n"
+                f"**Время в день:** {time_per_day}\n\n"
+                f"**Статус:** Активно"
             ),
             color=0x4F6653,
             timestamp=disnake.utils.utcnow(),
@@ -126,13 +124,13 @@ class TicketsCog(commands.Cog):
         new_embed.timestamp = disnake.utils.utcnow()
 
         desc = new_embed.description or ""
-        status_block = f"📌 **Статус:** {status_text}"
+        status_block = f"**Статус:** {status_text}"
         if moderator:
-            status_block += f"\n👮 **Модератор:** {moderator.mention}"
+            status_block += f"\n**Модератор:** {moderator.mention}"
 
-        if "📌 **Статус:**" in desc or "**Статус:**" in desc:
+        if "**Статус:**" in desc:
             new_desc = re.sub(
-                r"(?:📌\s*)?\*\*Статус:\*\*.*",
+                r"\*\*Статус:\*\*.*",
                 status_block,
                 desc,
                 flags=re.DOTALL,
@@ -151,7 +149,6 @@ class TicketsCog(commands.Cog):
                 return ui.Button(
                     label=comp.label or "Steam профиль",
                     url=comp.url,
-                    emoji=comp.emoji or "🌐",
                 )
         return None
 
@@ -171,24 +168,21 @@ class TicketsCog(commands.Cog):
             description="Канал для отправки (по умолчанию — текущий)",
         ),
     ):
-        """Отправляет стильное сообщение-контейнер с кнопкой для открытия модального окна анкеты."""
+        """Отправляет контейнер UI v2 с кнопкой подачи анкеты."""
         channel = target_channel or inter.channel
         if not channel or not isinstance(channel, disnake.abc.Messageable):
             return await inter.response.send_message(
-                "❌ Не удалось определить канал для отправки формы.",
+                "Не удалось определить канал для отправки формы.",
                 ephemeral=True,
             )
 
         container = ui.Container(
             ui.Section(
-                "👋 **Хотите вступить в наш клан?**\n"
-                "Нажмите на кнопку справа, чтобы заполнить анкету кандидата. "
-                "Заявка поступит руководству клана на рассмотрение.",
+                "Хотите вступить в наш клан?",
                 accessory=ui.Button(
                     label="Подать анкету",
                     custom_id="modal_form",
                     style=disnake.ButtonStyle.green,
-                    emoji="📝",
                 ),
             ),
             accent_colour=disnake.Colour(0x4F6653),
@@ -198,12 +192,12 @@ class TicketsCog(commands.Cog):
             await channel.send(components=[container])
             channel_label = getattr(channel, "mention", f"#{getattr(channel, 'name', 'канал')}")
             await inter.response.send_message(
-                f"✅ Сообщение с кнопкой подачи анкеты успешно отправлено в {channel_label}!",
+                f"Сообщение с кнопкой отправлено в {channel_label}!",
                 ephemeral=True,
             )
         except disnake.Forbidden:
             await inter.response.send_message(
-                "❌ У бота нет прав для отправки сообщений в выбранный канал.",
+                "У бота нет прав для отправки сообщений в выбранный канал.",
                 ephemeral=True,
             )
 
@@ -213,12 +207,12 @@ class TicketsCog(commands.Cog):
         if isinstance(inter.author, disnake.Member):
             if any(r.id == ROLE_ACCEPTED_ID for r in inter.author.roles):
                 return await inter.response.send_message(
-                    "ℹ️ Вы уже являетесь участником клана!",
+                    "Вы уже являетесь участником клана!",
                     ephemeral=True,
                 )
             if any(r.id == ROLE_PENDING_ID for r in inter.author.roles):
                 return await inter.response.send_message(
-                    "⏳ Ваша заявка уже находится на рассмотрении администрации. Ожидайте решения!",
+                    "Ваша заявка уже находится на рассмотрении администрации. Ожидайте решения!",
                     ephemeral=True,
                 )
 
@@ -248,9 +242,9 @@ class TicketsCog(commands.Cog):
                 required=True,
             ),
             ui.TextInput(
-                label="Игровые навыки / О себе",
+                label="Игровые навыки",
                 custom_id="bio_input",
-                placeholder="Провожу турели, сортировка, опыт стрельбы/фарма и т.д.",
+                placeholder="Провожу турели, сортировка, опыт PvP/фермы и т.д.",
                 style=disnake.TextInputStyle.paragraph,
                 max_length=1000,
                 required=True,
@@ -291,11 +285,10 @@ class TicketsCog(commands.Cog):
             is_valid_steam, steam_link = self._validate_steam_url(raw_steam_link)
             if not is_valid_steam:
                 return await inter.response.send_message(
-                    "❌ **Заявка заполнена неверно!**\n"
-                    "Укажите корректную ссылку на профиль Steam "
-                    "(например: `https://steamcommunity.com/id/...` или `https://steamcommunity.com/profiles/...`)",
+                    "Заявка заполнена неверно!\n"
+                    "Укажите корректную ссылку на Steam (начинающуюся с https://steamcommunity.com/)",
                     ephemeral=True,
-                    delete_after=15,
+                    delete_after=10,
                 )
 
             channel = self.bot.get_channel(APPLICATIONS_CHANNEL_ID)
@@ -307,8 +300,7 @@ class TicketsCog(commands.Cog):
 
             if not channel or not isinstance(channel, disnake.abc.Messageable):
                 return await inter.response.send_message(
-                    "❌ **Ошибка:** Канал для заявок не найден или бот не имеет к нему доступа. "
-                    "Пожалуйста, обратитесь к администрации.",
+                    "Ошибка: Канал для заявок не найден или бот не имеет к нему доступа.",
                     ephemeral=True,
                 )
 
@@ -327,40 +319,34 @@ class TicketsCog(commands.Cog):
                     label="Рассмотреть",
                     custom_id=f"check_{inter.author.id}",
                     style=disnake.ButtonStyle.blurple,
-                    emoji="🔍",
                 ),
                 ui.Button(
                     label="Принять",
                     custom_id=f"accept_{inter.author.id}",
                     style=disnake.ButtonStyle.green,
-                    emoji="✅",
                 ),
                 ui.Button(
                     label="Отклонить",
                     custom_id=f"reject_{inter.author.id}",
                     style=disnake.ButtonStyle.red,
-                    emoji="❌",
                 ),
                 ui.Button(
                     label="Steam профиль",
                     url=steam_link,
-                    emoji="🌐",
                 ),
             ]
 
             try:
                 await channel.send(embed=embed, components=buttons)
                 await inter.response.send_message(
-                    "✅ **Спасибо за вашу заявку!**\n"
-                    "Она передана на рассмотрение администрации клана. "
-                    "Мы свяжемся с вами в ближайшее время.",
+                    "Спасибо за вашу заявку! Мы свяжемся с вами.",
                     ephemeral=True,
                     delete_after=30,
                 )
             except Exception as e:
                 logger.error("Ошибка при отправке заявки в канал: %s", e)
                 await inter.response.send_message(
-                    "❌ Произошла ошибка при отправке заявки. Обратитесь к руководству клана.",
+                    "Произошла ошибка при обработке заявки.",
                     ephemeral=True,
                     delete_after=10,
                 )
@@ -371,18 +357,18 @@ class TicketsCog(commands.Cog):
             user_text = inter.text_values.get("text_to_send", "").strip()
             if not user_text:
                 return await inter.response.send_message(
-                    "❌ Текст сообщения не может быть пустым.",
+                    "Текст сообщения не может быть пустым.",
                     ephemeral=True,
                     delete_after=10,
                 )
 
             if not inter.channel or not isinstance(inter.channel, disnake.abc.Messageable):
                 return await inter.response.send_message(
-                    "❌ Не удалось отправить сообщение в текущий канал.",
+                    "Не удалось отправить сообщение в текущий канал.",
                     ephemeral=True,
                 )
 
-            await inter.response.send_message("✅ Принято!", ephemeral=True, delete_after=10)
+            await inter.response.send_message("Принято!", ephemeral=True, delete_after=10)
             await inter.channel.send(
                 components=[
                     ui.Container(
@@ -402,7 +388,7 @@ class TicketsCog(commands.Cog):
 
             if not inter.channel or not isinstance(inter.channel, disnake.abc.Messageable):
                 return await inter.response.send_message(
-                    "❌ Не удалось отправить объявление в текущий канал.",
+                    "Не удалось отправить объявление в текущий канал.",
                     ephemeral=True,
                 )
 
@@ -430,7 +416,7 @@ class TicketsCog(commands.Cog):
                 containers.append(ui.Container(ui.TextDisplay(text_2)))
             containers.append(ui.Container(ctg_3))
 
-            await inter.response.send_message("✅ Отправлено!", ephemeral=True, delete_after=10)
+            await inter.response.send_message("Отправлено!", ephemeral=True, delete_after=10)
             await inter.channel.send(components=containers)
             return
 
@@ -455,21 +441,21 @@ class TicketsCog(commands.Cog):
         guild = inter.guild
         if not guild or not isinstance(inter.author, disnake.Member):
             return await inter.response.send_message(
-                "❌ Действие доступно только на сервере.",
+                "Действие доступно только на сервере.",
                 ephemeral=True,
             )
 
         # Проверка прав модератора/администратора
         if not is_staff_member(inter.author):
             return await inter.response.send_message(
-                "❌ У вас нет прав для управления заявками.",
+                "У вас нет прав для управления заявками.",
                 ephemeral=True,
             )
 
         parts = custom_id.split("_", 1)
         if len(parts) < 2 or not parts[1].isdigit():
             return await inter.response.send_message(
-                "❌ Некорректный идентификатор пользователя в кнопке.",
+                "Некорректный идентификатор пользователя в кнопке.",
                 ephemeral=True,
             )
 
@@ -478,7 +464,7 @@ class TicketsCog(commands.Cog):
 
         if not inter.message or not inter.message.embeds:
             return await inter.response.send_message(
-                "❌ В сообщении отсутствует эмбед заявки.",
+                "В сообщении отсутствует эмбед заявки.",
                 ephemeral=True,
             )
 
@@ -498,7 +484,7 @@ class TicketsCog(commands.Cog):
         if action == "check":
             if not member:
                 return await inter.response.send_message(
-                    "❌ Пользователь не найден на сервере (возможно, покинул сервер).",
+                    "Пользователь не найден на сервере (возможно, покинул сервер).",
                     ephemeral=True,
                 )
 
@@ -514,7 +500,7 @@ class TicketsCog(commands.Cog):
 
             new_embed = self._update_application_embed(
                 embed=current_embed,
-                status_text="🟡 На рассмотрении",
+                status_text="Ожидает проверки",
                 color=disnake.Color.blurple(),
                 moderator=inter.author,
             )
@@ -525,19 +511,16 @@ class TicketsCog(commands.Cog):
                     custom_id=f"checked_{user_id}",
                     style=disnake.ButtonStyle.secondary,
                     disabled=True,
-                    emoji="🔍",
                 ),
                 ui.Button(
                     label="Принять",
                     custom_id=f"accept_{user_id}",
                     style=disnake.ButtonStyle.green,
-                    emoji="✅",
                 ),
                 ui.Button(
                     label="Отклонить",
                     custom_id=f"reject_{user_id}",
                     style=disnake.ButtonStyle.red,
-                    emoji="❌",
                 ),
             ]
             if steam_btn:
@@ -550,7 +533,7 @@ class TicketsCog(commands.Cog):
         if action == "accept":
             if not member:
                 return await inter.response.send_message(
-                    "❌ Пользователь не найден на сервере. Невозможно выдать роль участника клана.",
+                    "Пользователь не найден на сервере. Невозможно выдать роль участника клана.",
                     ephemeral=True,
                 )
 
@@ -580,15 +563,15 @@ class TicketsCog(commands.Cog):
             # Оповещаем пользователя в ЛС
             try:
                 await member.send(
-                    f"🎉 **Поздравляем!** Ваша заявка на вступление в клан на сервере **{guild.name}** "
-                    f"была одобрена модератором {inter.author.mention}!"
+                    f"Поздравляем! Ваша заявка на вступление в клан на сервере **{guild.name}** "
+                    f"была принята модератором {inter.author.mention}."
                 )
             except (disnake.Forbidden, disnake.HTTPException):
                 pass
 
             new_embed = self._update_application_embed(
                 embed=current_embed,
-                status_text="✅ Принят в клан",
+                status_text="Принят в клан",
                 color=disnake.Color.green(),
                 moderator=inter.author,
             )
@@ -613,13 +596,13 @@ class TicketsCog(commands.Cog):
 
                 try:
                     await member.send(
-                        f"❌ К сожалению, ваша заявка на вступление в клан на сервере **{guild.name}** "
+                        f"К сожалению, ваша заявка на вступление в клан на сервере **{guild.name}** "
                         f"была отклонена."
                     )
                 except (disnake.Forbidden, disnake.HTTPException):
                     pass
 
-            status_text = "❌ Отклонено" if member else "❌ Отклонено (пользователь покинул сервер)"
+            status_text = "Отклонено" if member else "Отклонено (пользователь покинул сервер)"
             new_embed = self._update_application_embed(
                 embed=current_embed,
                 status_text=status_text,
