@@ -8,12 +8,15 @@ from disnake import ui
 logger = logging.getLogger(__name__)
 
 DEFAULT_ROLE_MAP: dict[str, int] = {
-    "Фермер": 1491903740012269601,
-    "Электрик": 1491903740012269602,
-    "Строитель": 1491903740012269603,
-    "Стрелок (PvP)": 1491903740012269604,
-    "Монументы": 1491903740012269605,
-    "Пилот": 1491903740012269606,
+    "Дип-сишник": 1561425862514180156,
+    "РТ-вод": 1561425906633801899,
+    "Нефтянки": 1561425912094793980,
+    "Фармилка": 1561425923356496054,
+    "Кровавый пилот": 1561425962472837202,
+    "Билдерство": 1561425966100910100,
+    "Электрика": 1561425970072916068,
+    "Сортировка": 1561425974329868349,
+    "Комбат": 1561425978318786580,
 }
 
 
@@ -75,7 +78,6 @@ class RolesGiverCog(commands.Cog):
         return ui.Container(
             ui.TextDisplay("Выберите роли под ваш стиль игры в клане:"),
             ui.ActionRow(select_component),
-            accent_colour=disnake.Colour(0x4F6653),
         )
 
     @commands.slash_command(
@@ -109,7 +111,6 @@ class RolesGiverCog(commands.Cog):
                     style=disnake.ButtonStyle.blurple,
                 ),
             ),
-            accent_colour=disnake.Colour(0x4F6653),
         )
 
         try:

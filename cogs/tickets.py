@@ -12,7 +12,10 @@ logger = logging.getLogger(__name__)
 
 # Идентификаторы каналов и ролей для системы заявок
 APPLICATIONS_CHANNEL_ID = 1561407778168377394
-ROLE_PENDING_ID = 1561176093883633695
+ARCHIVE_CHANNEL_ID = 1561407978983260230
+REJECTED_CHANNEL_ID = 1561407835466629170
+ACCEPTED_CHANNEL_ID = 1561407867159056504
+ROLE_PENDING_ID = 1561451769001812079
 ROLE_ACCEPTED_ID = 1560076972854349904
 
 
@@ -107,8 +110,6 @@ class TicketsCog(commands.Cog):
             color=0x4F6653,
             timestamp=disnake.utils.utcnow(),
         )
-        embed.set_thumbnail(url=user.display_avatar.url)
-        embed.set_footer(text=f"ID кандидата: {user.id}")
         return embed
 
     @staticmethod
@@ -151,6 +152,64 @@ class TicketsCog(commands.Cog):
                     url=comp.url,
                 )
         return None
+
+    async def _send_log_notification(
+        self,
+        channel_id: int,
+        title: str,
+        user_mention: str,
+        moderator: Union[disnake.Member, disnake.User],
+        color: disnake.Color,
+    ) -> None:
+        """Отправляет краткое уведомление в канал логов принятых/отклоненных заявок."""
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except (disnake.NotFound, disnake.Forbidden, disnake.HTTPException):
+                channel = None
+
+        if not channel or not isinstance(channel, disnake.abc.Messageable):
+            logger.warning("Канал логирования заявок %s не найден или недоступен", channel_id)
+            return
+
+        embed = disnake.Embed(
+            title=title,
+            description=(
+                f"**Пользователь:** {user_mention}\n"
+                f"**Модератор:** {moderator.mention}"
+            ),
+            color=color,
+            timestamp=disnake.utils.utcnow(),
+        )
+
+        try:
+            await channel.send(embed=embed)
+        except (disnake.Forbidden, disnake.HTTPException) as e:
+            logger.error("Ошибка при отправке лога в канал %s: %s", channel_id, e)
+
+    async def _archive_application(
+        self,
+        embed: disnake.Embed,
+        steam_btn: Optional[ui.Button],
+    ) -> None:
+        """Дублирует рассмотренную анкету в архивный канал."""
+        archive_channel = self.bot.get_channel(ARCHIVE_CHANNEL_ID)
+        if archive_channel is None:
+            try:
+                archive_channel = await self.bot.fetch_channel(ARCHIVE_CHANNEL_ID)
+            except (disnake.NotFound, disnake.Forbidden, disnake.HTTPException):
+                archive_channel = None
+
+        if not archive_channel or not isinstance(archive_channel, disnake.abc.Messageable):
+            logger.warning("Канал архива заявок %s не найден или недоступен", ARCHIVE_CHANNEL_ID)
+            return
+
+        final_components = [steam_btn] if steam_btn else []
+        try:
+            await archive_channel.send(embed=embed, components=final_components)
+        except (disnake.Forbidden, disnake.HTTPException) as e:
+            logger.error("Ошибка при отправке анкеты в архив: %s", e)
 
     # --- КОМАНДЫ И МОДАЛЬНЫЕ ОКНА ---
 
@@ -487,8 +546,8 @@ class TicketsCog(commands.Cog):
                     ephemeral=True,
                 )
 
-            role_pending = guild.get_role(ROLE_PENDING_ID)
-            if role_pending and role_pending not in member.roles:
+            role_pending = guild.get_role(ROLE_PENDING_ID) or disnake.Object(id=ROLE_PENDING_ID)
+            if not any(r.id == ROLE_PENDING_ID for r in member.roles):
                 try:
                     await member.add_roles(
                         role_pending,
@@ -536,11 +595,11 @@ class TicketsCog(commands.Cog):
                     ephemeral=True,
                 )
 
-            role_pending = guild.get_role(ROLE_PENDING_ID)
-            role_accepted = guild.get_role(ROLE_ACCEPTED_ID)
+            role_pending = guild.get_role(ROLE_PENDING_ID) or disnake.Object(id=ROLE_PENDING_ID)
+            role_accepted = guild.get_role(ROLE_ACCEPTED_ID) or disnake.Object(id=ROLE_ACCEPTED_ID)
 
             # Снимаем роль рассмотрения
-            if role_pending and role_pending in member.roles:
+            if any(r.id == ROLE_PENDING_ID for r in member.roles):
                 try:
                     await member.remove_roles(
                         role_pending,
@@ -550,14 +609,13 @@ class TicketsCog(commands.Cog):
                     logger.warning("Нет прав для снятия роли рассмотрения")
 
             # Выдаем роль участника клана
-            if role_accepted:
-                try:
-                    await member.add_roles(
-                        role_accepted,
-                        reason=f"Заявка принята: {inter.author}",
-                    )
-                except disnake.Forbidden:
-                    logger.warning("Нет прав для выдачи роли участника клана %s", ROLE_ACCEPTED_ID)
+            try:
+                await member.add_roles(
+                    role_accepted,
+                    reason=f"Заявка принята: {inter.author}",
+                )
+            except disnake.Forbidden:
+                logger.warning("Нет прав для выдачи роли участника клана %s", ROLE_ACCEPTED_ID)
 
             # Оповещаем пользователя в ЛС
             try:
@@ -575,16 +633,34 @@ class TicketsCog(commands.Cog):
                 moderator=inter.author,
             )
 
-            # Оставляем только кнопку профиля Steam (если была)
-            final_components = [steam_btn] if steam_btn else []
-            await inter.response.edit_message(embed=new_embed, components=final_components)
+            # Отвечаем модератору
+            await inter.response.send_message("Заявка принята и перемещена в архив.", ephemeral=True)
+
+            # Дублируем анкету в архивный канал
+            await self._archive_application(embed=new_embed, steam_btn=steam_btn)
+
+            # Удаляем исходное сообщение из первичного канала
+            try:
+                await inter.message.delete()
+            except (disnake.NotFound, disnake.Forbidden, disnake.HTTPException) as e:
+                logger.warning("Не удалось удалить заявку из первичного канала: %s", e)
+
+            # Логируем в канал принятых заявок
+            user_mention = member.mention if member else f"<@{user_id}>"
+            await self._send_log_notification(
+                channel_id=ACCEPTED_CHANNEL_ID,
+                title="Заявка принята",
+                user_mention=user_mention,
+                moderator=inter.author,
+                color=disnake.Color.green(),
+            )
             return
 
         # 3. Отклонить заявку
         if action == "reject":
             if member:
-                role_pending = guild.get_role(ROLE_PENDING_ID)
-                if role_pending and role_pending in member.roles:
+                role_pending = guild.get_role(ROLE_PENDING_ID) or disnake.Object(id=ROLE_PENDING_ID)
+                if any(r.id == ROLE_PENDING_ID for r in member.roles):
                     try:
                         await member.remove_roles(
                             role_pending,
@@ -609,8 +685,27 @@ class TicketsCog(commands.Cog):
                 moderator=inter.author,
             )
 
-            final_components = [steam_btn] if steam_btn else []
-            await inter.response.edit_message(embed=new_embed, components=final_components)
+            # Отвечаем модератору
+            await inter.response.send_message("Заявка отклонена и перемещена в архив.", ephemeral=True)
+
+            # Дублируем анкету в архивный канал
+            await self._archive_application(embed=new_embed, steam_btn=steam_btn)
+
+            # Удаляем исходное сообщение из первичного канала
+            try:
+                await inter.message.delete()
+            except (disnake.NotFound, disnake.Forbidden, disnake.HTTPException) as e:
+                logger.warning("Не удалось удалить заявку из первичного канала: %s", e)
+
+            # Логируем в канал отклоненных заявок
+            user_mention = member.mention if member else f"<@{user_id}>"
+            await self._send_log_notification(
+                channel_id=REJECTED_CHANNEL_ID,
+                title="Заявка отклонена",
+                user_mention=user_mention,
+                moderator=inter.author,
+                color=disnake.Color.red(),
+            )
             return
 
 
