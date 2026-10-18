@@ -1,0 +1,12 @@
+{
+    "prefix": "+",
+    "test_guilds": [
+        1560064596440645654
+    ],
+    "colors": {
+        "default": 16777215,
+        "error": 16711680,
+        "success": 65280
+    },
+    "version": "0.2.31a"
+}
