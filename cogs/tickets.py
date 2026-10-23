@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 import urllib.parse
@@ -11,21 +12,100 @@ from functions.utils import is_staff_member
 logger = logging.getLogger(__name__)
 
 # Идентификаторы каналов и ролей для системы заявок
-APPLICATIONS_CHANNEL_ID = 1561407778168377394
-ARCHIVE_CHANNEL_ID = 1561407978983260230
-REJECTED_CHANNEL_ID = 1561407835466629170
-ACCEPTED_CHANNEL_ID = 1561407867159056504
-ROLE_PENDING_ID = 1561451769001812079
-ROLE_ACCEPTED_ID = 1560076972854349904
+# Если в TICKETS_CATEGORY_ID указан прочерк ("-"), тикет создается в самом верху без категории
+TICKETS_CATEGORY_ID: Union[int, str, None] = "-"  # ID категории для тикетов заявок или "-" (без категории вверху)
+APPLICATIONS_CHANNEL_ID: Union[int, str, None] = 1561407778168377394  # Канал первичных заявок (или "-" если не нужен)
+ARCHIVE_CHANNEL_ID: Union[int, str, None] = 1561407978983260230
+REJECTED_CHANNEL_ID: Union[int, str, None] = 1561407835466629170
+ACCEPTED_CHANNEL_ID: Union[int, str, None] = 1561407867159056504
+ROLE_PENDING_ID: int = 1561451769001812079
+ROLE_ACCEPTED_ID: int = 1560076972854349904
 
 
 class TicketsCog(commands.Cog):
-    """Модуль системы анкет и заявок на вступление в клан."""
+    """Модуль системы анкет и тикетов заявок на вступление в клан."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        # Кэш соответствия: user_id -> ticket_channel_id
+        self.ticket_channels: dict[int, int] = {}
+        # Кэш сообщений в первичном канале: user_id -> (channel_id, message_id)
+        self.application_messages: dict[int, Tuple[int, int]] = {}
 
     # --- ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ МОДУЛЯ ---
+
+    @staticmethod
+    def _parse_id(val: Any) -> Optional[int]:
+        """Безопасно преобразует значение в числовой ID канала или роли (прочерк '-' возвращает None)."""
+        if val is None or val == "-" or val == "" or val == 0:
+            return None
+        try:
+            parsed = int(str(val).strip())
+            return parsed if parsed > 0 else None
+        except ValueError:
+            return None
+
+    async def _get_channel_safe(self, channel_id: int) -> Optional[disnake.abc.Messageable]:
+        """Получает канал из кэша или через API."""
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except (disnake.NotFound, disnake.Forbidden, disnake.HTTPException):
+                channel = None
+
+        if isinstance(channel, disnake.abc.Messageable):
+            return channel
+        return None
+
+    async def _resolve_category(self, guild: disnake.Guild) -> Optional[disnake.CategoryChannel]:
+        """Определяет категорию для создания каналов тикетов."""
+        cat_id = self._parse_id(TICKETS_CATEGORY_ID)
+        if not cat_id:
+            return None
+
+        category = guild.get_channel(cat_id)
+        if category is None:
+            try:
+                category = await self.bot.fetch_channel(cat_id)
+            except (disnake.NotFound, disnake.Forbidden, disnake.HTTPException):
+                category = None
+
+        if isinstance(category, disnake.CategoryChannel):
+            return category
+        return None
+
+    def _find_user_ticket_channel(
+        self, guild: disnake.Guild, user_id: int
+    ) -> Optional[disnake.TextChannel]:
+        """Ищет активный текстовый канал тикета для указанного пользователя."""
+        # 1. Сначала проверяем кэш сессий в памяти
+        channel_id = self.ticket_channels.get(user_id)
+        if channel_id:
+            ch = guild.get_channel(channel_id)
+            if isinstance(ch, disnake.TextChannel):
+                return ch
+
+        # 2. Ищем по топику канала
+        target_marker = f"ID: {user_id}"
+        for ch in guild.text_channels:
+            if ch.topic and target_marker in ch.topic:
+                self.ticket_channels[user_id] = ch.id
+                return ch
+
+        return None
+
+    @staticmethod
+    async def _delayed_delete_channel(
+        channel: disnake.TextChannel, delay: int = 3, reason: str = ""
+    ) -> None:
+        """Удаляет канал тикета с небольшой задержкой."""
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            await channel.delete(reason=reason)
+        except (disnake.NotFound, disnake.Forbidden, disnake.HTTPException) as e:
+            logger.warning("Не удалось удалить канал тикета %s: %s", channel.id, e)
 
     @staticmethod
     def _parse_name_and_age(raw_text: str) -> Tuple[str, str]:
@@ -163,14 +243,8 @@ class TicketsCog(commands.Cog):
         color: disnake.Color,
     ) -> None:
         """Отправляет краткое уведомление в канал логов принятых/отклоненных заявок."""
-        channel = self.bot.get_channel(channel_id)
-        if channel is None:
-            try:
-                channel = await self.bot.fetch_channel(channel_id)
-            except (disnake.NotFound, disnake.Forbidden, disnake.HTTPException):
-                channel = None
-
-        if not channel or not isinstance(channel, disnake.abc.Messageable):
+        channel = await self._get_channel_safe(channel_id)
+        if not channel:
             logger.warning("Канал логирования заявок %s не найден или недоступен", channel_id)
             return
 
@@ -195,15 +269,13 @@ class TicketsCog(commands.Cog):
         steam_btn: Optional[ui.Button],
     ) -> None:
         """Дублирует рассмотренную анкету в архивный канал."""
-        archive_channel = self.bot.get_channel(ARCHIVE_CHANNEL_ID)
-        if archive_channel is None:
-            try:
-                archive_channel = await self.bot.fetch_channel(ARCHIVE_CHANNEL_ID)
-            except (disnake.NotFound, disnake.Forbidden, disnake.HTTPException):
-                archive_channel = None
+        arch_id = self._parse_id(ARCHIVE_CHANNEL_ID)
+        if not arch_id:
+            return
 
-        if not archive_channel or not isinstance(archive_channel, disnake.abc.Messageable):
-            logger.warning("Канал архива заявок %s не найден или недоступен", ARCHIVE_CHANNEL_ID)
+        archive_channel = await self._get_channel_safe(arch_id)
+        if not archive_channel:
+            logger.warning("Канал архива заявок %s не найден или недоступен", arch_id)
             return
 
         final_components = [steam_btn] if steam_btn else []
@@ -262,8 +334,9 @@ class TicketsCog(commands.Cog):
 
     async def modal_form(self, inter: disnake.MessageInteraction):
         """Открывает модальное окно с анкетой на вступление."""
-        # Проверяем, не состоит ли пользователь уже в клане
+        guild = inter.guild
         if isinstance(inter.author, disnake.Member):
+            # Проверяем, не состоит ли пользователь уже в клане
             if any(r.id == ROLE_ACCEPTED_ID for r in inter.author.roles):
                 return await inter.response.send_message(
                     "Вы уже являетесь участником клана!",
@@ -272,6 +345,15 @@ class TicketsCog(commands.Cog):
             if any(r.id == ROLE_PENDING_ID for r in inter.author.roles):
                 return await inter.response.send_message(
                     "Ваша заявка уже находится на рассмотрении администрации. Ожидайте решения!",
+                    ephemeral=True,
+                )
+
+        # Проверяем, нет ли уже открытого тикета у пользователя
+        if guild:
+            existing_ticket = self._find_user_ticket_channel(guild, inter.author.id)
+            if existing_ticket:
+                return await inter.response.send_message(
+                    f"У вас уже есть открытый тикет заявки: {existing_ticket.mention}!",
                     ephemeral=True,
                 )
 
@@ -331,87 +413,201 @@ class TicketsCog(commands.Cog):
     @commands.Cog.listener()
     async def on_modal_submit(self, inter: disnake.ModalInteraction):
         """Обработчик отправки модальных окон."""
-        # 1. Анкета на вступление в клан
-        if inter.custom_id.startswith("form_user"):
-            raw_name_age = inter.text_values.get("name_age_input", "").strip()
-            name, age = self._parse_name_and_age(raw_name_age)
+        if not inter.custom_id.startswith("form_user"):
+            return
 
-            raw_steam_link = inter.text_values.get("steam_link_input", "").strip()
-            clock = inter.text_values.get("clock_input", "Н/Д").strip()
-            bio = inter.text_values.get("bio_input", "Н/Д").strip()
-            time_per_day = inter.text_values.get("time_per_day_input", "Н/Д").strip()
-
-            is_valid_steam, steam_link = self._validate_steam_url(raw_steam_link)
-            if not is_valid_steam:
-                return await inter.response.send_message(
-                    "Заявка заполнена неверно!\n"
-                    "Укажите корректную ссылку на Steam (начинающуюся с https://steamcommunity.com/)",
-                    ephemeral=True,
-                    delete_after=10,
-                )
-
-            channel = self.bot.get_channel(APPLICATIONS_CHANNEL_ID)
-            if channel is None:
-                try:
-                    channel = await self.bot.fetch_channel(APPLICATIONS_CHANNEL_ID)
-                except (disnake.NotFound, disnake.Forbidden, disnake.HTTPException):
-                    channel = None
-
-            if not channel or not isinstance(channel, disnake.abc.Messageable):
-                return await inter.response.send_message(
-                    "Ошибка: Канал для заявок не найден или бот не имеет к нему доступа.",
-                    ephemeral=True,
-                )
-
-            embed = self._create_application_embed(
-                user=inter.author,
-                name=name,
-                age=age,
-                bio=bio,
-                clock=clock,
-                time_per_day=time_per_day,
-                steam_link=steam_link,
+        guild = inter.guild
+        if not guild or not isinstance(inter.author, disnake.Member):
+            return await inter.response.send_message(
+                "Подача заявок доступна только на сервере.",
+                ephemeral=True,
             )
 
-            buttons = [
-                ui.Button(
-                    label="Рассмотреть",
-                    custom_id=f"check_{inter.author.id}",
-                    style=disnake.ButtonStyle.blurple,
-                ),
-                ui.Button(
-                    label="Принять",
-                    custom_id=f"accept_{inter.author.id}",
-                    style=disnake.ButtonStyle.green,
-                    disabled=True,
-                ),
-                ui.Button(
-                    label="Отклонить",
-                    custom_id=f"reject_{inter.author.id}",
-                    style=disnake.ButtonStyle.red,
-                    disabled=True,
-                ),
-                ui.Button(
-                    label="Steam профиль",
-                    url=steam_link,
-                ),
-            ]
+        raw_name_age = inter.text_values.get("name_age_input", "").strip()
+        name, age = self._parse_name_and_age(raw_name_age)
 
-            try:
-                await channel.send(embed=embed, components=buttons)
-                await inter.response.send_message(
-                    "Спасибо за вашу заявку! Мы свяжемся с вами.",
-                    ephemeral=True,
-                    delete_after=30,
+        raw_steam_link = inter.text_values.get("steam_link_input", "").strip()
+        clock = inter.text_values.get("clock_input", "Н/Д").strip()
+        bio = inter.text_values.get("bio_input", "Н/Д").strip()
+        time_per_day = inter.text_values.get("time_per_day_input", "Н/Д").strip()
+
+        is_valid_steam, steam_link = self._validate_steam_url(raw_steam_link)
+        if not is_valid_steam:
+            return await inter.response.send_message(
+                "Заявка заполнена неверно!\n"
+                "Укажите корректную ссылку на Steam (начинающуюся с https://steamcommunity.com/)",
+                ephemeral=True,
+                delete_after=10,
+            )
+
+        embed = self._create_application_embed(
+            user=inter.author,
+            name=name,
+            age=age,
+            bio=bio,
+            clock=clock,
+            time_per_day=time_per_day,
+            steam_link=steam_link,
+        )
+
+        buttons = [
+            ui.Button(
+                label="Рассмотреть",
+                custom_id=f"check_{inter.author.id}",
+                style=disnake.ButtonStyle.blurple,
+            ),
+            ui.Button(
+                label="Принять",
+                custom_id=f"accept_{inter.author.id}",
+                style=disnake.ButtonStyle.green,
+                disabled=True,
+            ),
+            ui.Button(
+                label="Отклонить",
+                custom_id=f"reject_{inter.author.id}",
+                style=disnake.ButtonStyle.red,
+                disabled=True,
+            ),
+            ui.Button(
+                label="Steam профиль",
+                url=steam_link,
+            ),
+        ]
+
+        # --- СОЗДАНИЕ ТИКЕТ-КАНАЛА ---
+        category = await self._resolve_category(guild)
+
+        overwrites: dict[Union[disnake.Role, disnake.Member], disnake.PermissionOverwrite] = {}
+
+        # Наследуем права категории, если она задана
+        if category and category.overwrites:
+            for target, target_overwrites in category.overwrites.items():
+                if isinstance(target, (disnake.Role, disnake.Member)):
+                    overwrites[target] = target_overwrites
+
+        # @everyone не имеет доступа к тикету
+        overwrites[guild.default_role] = disnake.PermissionOverwrite(
+            view_channel=False,
+            read_messages=False,
+        )
+
+        # Кандидат имеет доступ и может писать в тикете
+        overwrites[inter.author] = disnake.PermissionOverwrite(
+            view_channel=True,
+            read_messages=True,
+            send_messages=True,
+            read_message_history=True,
+            attach_files=True,
+            embed_links=True,
+        )
+
+        # Бот имеет полные права управления каналом
+        if guild.me:
+            overwrites[guild.me] = disnake.PermissionOverwrite(
+                view_channel=True,
+                read_messages=True,
+                send_messages=True,
+                manage_channels=True,
+                manage_messages=True,
+                read_message_history=True,
+                embed_links=True,
+                attach_files=True,
+            )
+
+        # Даем доступ ролям администрации и модерации
+        for role in guild.roles:
+            if role not in overwrites and role != guild.default_role:
+                if (
+                    role.permissions.administrator
+                    or role.permissions.manage_guild
+                    or role.permissions.manage_roles
+                    or role.permissions.manage_channels
+                    or role.permissions.kick_members
+                    or role.permissions.ban_members
+                ):
+                    overwrites[role] = disnake.PermissionOverwrite(
+                        view_channel=True,
+                        read_messages=True,
+                        send_messages=True,
+                        read_message_history=True,
+                        manage_messages=True,
+                        embed_links=True,
+                        attach_files=True,
+                    )
+
+        # Формируем имя и топик тикета
+        sanitized_name = re.sub(r"[^a-zA-Z0-9а-яА-ЯёЁ_-]", "", name).lower().strip("-_")
+        if not sanitized_name:
+            sanitized_name = re.sub(r"[^a-zA-Z0-9а-яА-ЯёЁ_-]", "", inter.author.name).lower().strip("-_")
+        if not sanitized_name:
+            sanitized_name = str(inter.author.id)
+        channel_name = f"тикет-{sanitized_name}"[:32]
+        topic = f"Тикет-заявка в клан | Кандидат: {inter.author} (ID: {inter.author.id})"
+
+        ticket_channel: Optional[disnake.TextChannel] = None
+        try:
+            if category:
+                ticket_channel = await guild.create_text_channel(
+                    name=channel_name,
+                    category=category,
+                    overwrites=overwrites,
+                    topic=topic,
+                    reason=f"Тикет заявки в клан от {inter.author}",
                 )
-            except Exception as e:
-                logger.error("Ошибка при отправке заявки в канал: %s", e)
-                await inter.response.send_message(
-                    "Произошла ошибка при обработке заявки.",
-                    ephemeral=True,
-                    delete_after=10,
+            else:
+                # Если в коде указан прочерк ("-") — создается в самом верху без категории
+                ticket_channel = await guild.create_text_channel(
+                    name=channel_name,
+                    position=0,
+                    overwrites=overwrites,
+                    topic=topic,
+                    reason=f"Тикет заявки в клан от {inter.author}",
                 )
-            return
+        except Exception as e:
+            logger.error("Ошибка при создании канала тикета: %s", e)
+            return await inter.response.send_message(
+                "Произошла ошибка при создании канала тикета. Обратитесь к администрации.",
+                ephemeral=True,
+                delete_after=10,
+            )
+
+        self.ticket_channels[inter.author.id] = ticket_channel.id
+
+        # Отправляем текст заявки в созданный тикет-чат
+        welcome_content = (
+            f"{inter.author.mention}, ваша анкета на вступление успешно создана!\n"
+            f"Ожидайте ответа администрации клана. Здесь вы можете ответить на уточняющие вопросы."
+        )
+        try:
+            await ticket_channel.send(
+                content=welcome_content,
+                embed=embed,
+                components=buttons,
+            )
+        except Exception as e:
+            logger.error("Ошибка при отправке анкеты в тикет: %s", e)
+
+        # Если задан первичный канал заявок — дублируем и туда
+        app_chan_id = self._parse_id(APPLICATIONS_CHANNEL_ID)
+        if app_chan_id:
+            app_chan = await self._get_channel_safe(app_chan_id)
+            if app_chan:
+                try:
+                    app_msg = await app_chan.send(
+                        content=f"Новая заявка в тикете: {ticket_channel.mention}",
+                        embed=embed,
+                        components=buttons,
+                    )
+                    if isinstance(app_msg, disnake.Message):
+                        self.application_messages[inter.author.id] = (app_chan_id, app_msg.id)
+                except Exception as e:
+                    logger.warning("Не удалось продублировать заявку в первичный канал: %s", e)
+
+        await inter.response.send_message(
+            f"Спасибо за вашу заявку! Для вас создан тикет: {ticket_channel.mention}.",
+            ephemeral=True,
+            delete_after=60,
+        )
 
     @commands.Cog.listener()
     async def on_button_click(self, inter: disnake.MessageInteraction):
@@ -488,6 +684,9 @@ class TicketsCog(commands.Cog):
                     ephemeral=True,
                 )
 
+        # Находим связанный канал тикета (если существует)
+        ticket_channel = self._find_user_ticket_channel(guild, user_id)
+
         # 1. Взять на рассмотрение
         if action == "check":
             if member:
@@ -531,7 +730,34 @@ class TicketsCog(commands.Cog):
                 new_buttons.append(steam_btn)
 
             await inter.response.edit_message(embed=new_embed, components=new_buttons)
+
+            # Если действие вызвано вне тикета, отправляем оповещение в сам тикет
+            if ticket_channel and inter.channel_id != ticket_channel.id:
+                try:
+                    await ticket_channel.send(
+                        f"Модератор {inter.author.mention} взял вашу заявку на рассмотрение."
+                    )
+                except Exception:
+                    pass
             return
+
+        # Вспомогательная функция для очистки дублированного сообщения в первичном канале
+        async def _cleanup_primary_message():
+            app_info = self.application_messages.pop(user_id, None)
+            if app_info:
+                c_id, m_id = app_info
+                ch = guild.get_channel(c_id)
+                if ch and isinstance(ch, disnake.abc.Messageable):
+                    try:
+                        m = await ch.fetch_message(m_id)
+                        await m.delete()
+                    except Exception:
+                        pass
+            elif inter.channel_id != getattr(ticket_channel, "id", 0):
+                try:
+                    await inter.message.delete()
+                except Exception:
+                    pass
 
         # 2. Принять в клан
         if action == "accept":
@@ -579,27 +805,57 @@ class TicketsCog(commands.Cog):
                 moderator=inter.author,
             )
 
-            # Отвечаем модератору
-            await inter.response.send_message("Заявка принята и перемещена в архив.", ephemeral=True)
-
             # Дублируем анкету в архивный канал
             await self._archive_application(embed=new_embed, steam_btn=steam_btn)
 
-            # Удаляем исходное сообщение из первичного канала
-            try:
-                await inter.message.delete()
-            except (disnake.NotFound, disnake.Forbidden, disnake.HTTPException) as e:
-                logger.warning("Не удалось удалить заявку из первичного канала: %s", e)
-
             # Логируем в канал принятых заявок
-            user_mention = member.mention if member else f"<@{user_id}>"
-            await self._send_log_notification(
-                channel_id=ACCEPTED_CHANNEL_ID,
-                title="Заявка принята",
-                user_mention=user_mention,
-                moderator=inter.author,
-                color=disnake.Color.green(),
-            )
+            acc_id = self._parse_id(ACCEPTED_CHANNEL_ID)
+            if acc_id:
+                user_mention = member.mention if member else f"<@{user_id}>"
+                await self._send_log_notification(
+                    channel_id=acc_id,
+                    title="Заявка принята",
+                    user_mention=user_mention,
+                    moderator=inter.author,
+                    color=disnake.Color.green(),
+                )
+
+            # Очищаем сообщение первичного канала
+            await _cleanup_primary_message()
+
+            # Удаляем тикет-чат
+            if ticket_channel:
+                if inter.channel_id == ticket_channel.id:
+                    await inter.response.send_message(
+                        "Заявка принята! Данный канал тикета будет автоматически удален через несколько секунд...",
+                        ephemeral=False,
+                    )
+                    asyncio.create_task(
+                        self._delayed_delete_channel(
+                            ticket_channel,
+                            delay=4,
+                            reason=f"Заявка принята модератором {inter.author}",
+                        )
+                    )
+                else:
+                    await inter.response.send_message(
+                        "Заявка принята и перемещена в архив. Канал тикета удален.",
+                        ephemeral=True,
+                    )
+                    asyncio.create_task(
+                        self._delayed_delete_channel(
+                            ticket_channel,
+                            delay=1,
+                            reason=f"Заявка принята модератором {inter.author}",
+                        )
+                    )
+            else:
+                await inter.response.send_message(
+                    "Заявка принята и перемещена в архив.",
+                    ephemeral=True,
+                )
+
+            self.ticket_channels.pop(user_id, None)
             return
 
         # 3. Отклонить заявку
@@ -631,27 +887,57 @@ class TicketsCog(commands.Cog):
                 moderator=inter.author,
             )
 
-            # Отвечаем модератору
-            await inter.response.send_message("Заявка отклонена и перемещена в архив.", ephemeral=True)
-
             # Дублируем анкету в архивный канал
             await self._archive_application(embed=new_embed, steam_btn=steam_btn)
 
-            # Удаляем исходное сообщение из первичного канала
-            try:
-                await inter.message.delete()
-            except (disnake.NotFound, disnake.Forbidden, disnake.HTTPException) as e:
-                logger.warning("Не удалось удалить заявку из первичного канала: %s", e)
-
             # Логируем в канал отклоненных заявок
-            user_mention = member.mention if member else f"<@{user_id}>"
-            await self._send_log_notification(
-                channel_id=REJECTED_CHANNEL_ID,
-                title="Заявка отклонена",
-                user_mention=user_mention,
-                moderator=inter.author,
-                color=disnake.Color.red(),
-            )
+            rej_id = self._parse_id(REJECTED_CHANNEL_ID)
+            if rej_id:
+                user_mention = member.mention if member else f"<@{user_id}>"
+                await self._send_log_notification(
+                    channel_id=rej_id,
+                    title="Заявка отклонена",
+                    user_mention=user_mention,
+                    moderator=inter.author,
+                    color=disnake.Color.red(),
+                )
+
+            # Очищаем сообщение первичного канала
+            await _cleanup_primary_message()
+
+            # Удаляем тикет-чат
+            if ticket_channel:
+                if inter.channel_id == ticket_channel.id:
+                    await inter.response.send_message(
+                        "Заявка отклонена. Данный канал тикета будет автоматически удален через несколько секунд...",
+                        ephemeral=False,
+                    )
+                    asyncio.create_task(
+                        self._delayed_delete_channel(
+                            ticket_channel,
+                            delay=4,
+                            reason=f"Заявка отклонена модератором {inter.author}",
+                        )
+                    )
+                else:
+                    await inter.response.send_message(
+                        "Заявка отклонена и перемещена в архив. Канал тикета удален.",
+                        ephemeral=True,
+                    )
+                    asyncio.create_task(
+                        self._delayed_delete_channel(
+                            ticket_channel,
+                            delay=1,
+                            reason=f"Заявка отклонена модератором {inter.author}",
+                        )
+                    )
+            else:
+                await inter.response.send_message(
+                    "Заявка отклонена и перемещена в архив.",
+                    ephemeral=True,
+                )
+
+            self.ticket_channels.pop(user_id, None)
             return
 
 
