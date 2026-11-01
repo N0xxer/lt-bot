@@ -729,8 +729,17 @@ class ContainerCreatorCog(commands.Cog):
         """Обработка модальных окон добавления контента в конструктор и быстрых команд."""
         custom_id = inter.custom_id
 
+        # Проверяем, относится ли модальное окно к данному когу
+        if not (
+            custom_id.startswith("builder_modal_")
+            or custom_id.startswith("modal_msg_sender")
+            or custom_id.startswith("modal_ad_sender")
+        ):
+            return
+
         # Мгновенно подтверждаем модальное окно во избежание ошибки «приложение не ответило вовремя»
-        await inter.response.defer(ephemeral=True)
+        if not inter.response.is_done():
+            await inter.response.defer(ephemeral=True)
 
         # 1. Модальные окна интерактивного конструктора
         if custom_id.startswith("builder_modal_"):
