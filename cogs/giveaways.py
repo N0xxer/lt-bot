@@ -105,6 +105,8 @@ class GiveawaysCog(commands.Cog):
         self.bot = bot
         # Временное хранилище параметров запуска: user_id -> (banner_url, target_channel_id)
         self.pending_setups: dict[int, Tuple[Optional[str], int]] = {}
+        # Таймстамп последнего обновления эмбеда розыгрыша
+        self.last_embed_update: float = 0.0
         # Фоновый таймер проверки голосовой активности и окончания розыгрышей
         self.voice_activity_tracker.start()
 
@@ -160,6 +162,34 @@ class GiveawaysCog(commands.Cog):
         except Exception as e:
             logger.error("Ошибка при начислении минут войс-активности: %s", e)
 
+        # 3. Периодически обновляем эмбед розыгрыша раз в 30 секунд
+        if (now - self.last_embed_update) >= 30:
+            self.last_embed_update = float(now)
+            channel = guild.get_channel(gw["channel_id"])
+            if channel is None:
+                try:
+                    channel = await self.bot.fetch_channel(gw["channel_id"])
+                except Exception:
+                    channel = None
+            if channel and isinstance(channel, disnake.abc.Messageable):
+                try:
+                    total_count, eligible_count = await get_giveaway_counts(gw["activity_minutes"])
+                    prizes = format_prizes_list(gw["prizes"])
+                    updated_embed = self._build_giveaway_embed(
+                        title=gw["title"],
+                        description=gw["description"],
+                        prizes=prizes,
+                        end_time=gw["end_time"],
+                        activity_minutes=gw["activity_minutes"],
+                        total_count=total_count,
+                        eligible_count=eligible_count,
+                        banner_url=gw["banner_url"],
+                    )
+                    msg = await channel.fetch_message(gw["message_id"])
+                    await msg.edit(embed=updated_embed)
+                except Exception:
+                    pass
+
     @voice_activity_tracker.before_loop
     async def before_voice_activity_tracker(self):
         await self.bot.wait_until_ready()
@@ -173,6 +203,7 @@ class GiveawaysCog(commands.Cog):
         prizes: list[str],
         end_time: int,
         activity_minutes: int,
+        total_count: int = 0,
         eligible_count: int = 0,
         banner_url: Optional[str] = None,
     ) -> disnake.Embed:
@@ -187,7 +218,8 @@ class GiveawaysCog(commands.Cog):
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"⏱️ **Завершение:** <t:{end_time}:R> (<t:{end_time}:f>)\n"
             f"🎙️ **Требуемое время в войсе:** `{format_minutes(activity_minutes)}`\n"
-            f"👥 **Выполнили условие:** `{eligible_count}` участников\n"
+            f"👥 **Количество участников:** `{total_count}` участников\n"
+            f"✅ **Выполнили условие:** `{eligible_count}` участников\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         )
 
@@ -275,7 +307,8 @@ class GiveawaysCog(commands.Cog):
                     "user_mention": "Недостаточно участников",
                 })
 
-        participants_count = len(valid_members)
+        total_count, _ = await get_giveaway_counts(activity_minutes)
+        eligible_valid_count = len(valid_members)
 
         # Записываем результат завершения в БД
         winners_json = json.dumps(winners_data, ensure_ascii=False)
@@ -304,7 +337,8 @@ class GiveawaysCog(commands.Cog):
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"⏱️ **Статус:** Завершен\n"
                 f"🎙️ **Требовалось в войсе:** `{format_minutes(activity_minutes)}`\n"
-                f"👥 **Выполнили условие:** `{participants_count}` участников\n"
+                f"👥 **Количество участников:** `{total_count}` участников\n"
+                f"✅ **Выполнили условие:** `{eligible_valid_count}` участников\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             )
 
@@ -340,7 +374,8 @@ class GiveawaysCog(commands.Cog):
                         f"🏆 **Победители:**\n"
                         f"{winners_text}\n\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"👥 **Всего участвовало:** `{participants_count}` чел.\n"
+                        f"👥 **Количество участников:** `{total_count}` чел.\n"
+                        f"✅ **Выполнили условие:** `{eligible_valid_count}` чел.\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                         f"📩 Свяжитесь с администрацией для получения своих призов! 🏆"
                     ),
@@ -360,7 +395,8 @@ class GiveawaysCog(commands.Cog):
                         f"К сожалению, ни один участник не выполнил необходимое условие по времени в голосовых каналах "
                         f"(`{format_minutes(activity_minutes)}`).\n\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"👥 **Всего участвовало:** `{participants_count}` чел.\n"
+                        f"👥 **Количество участников:** `{total_count}` чел.\n"
+                        f"✅ **Выполнили условие:** `0` чел.\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                     ),
                     color=0xDC143C,
@@ -381,7 +417,8 @@ class GiveawaysCog(commands.Cog):
                             description=(
                                 f"Вы выиграли приз **{item['prize']}** в розыгрыше **«{gw['title']}»** на сервере **{guild.name}**!\n\n"
                                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"👥 **Всего участвовало:** `{participants_count}` чел.\n"
+                                f"👥 **Количество участников:** `{total_count}` чел.\n"
+                                f"✅ **Выполнили условие:** `{eligible_valid_count}` чел.\n"
                                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                                 f"📩 Свяжитесь с организатором или администрацией сервера для получения своего приза."
                             ),
@@ -646,6 +683,7 @@ class GiveawaysCog(commands.Cog):
             prizes=prizes,
             end_time=end_time,
             activity_minutes=activity_minutes,
+            total_count=0,
             eligible_count=0,
             banner_url=banner_url,
         )
@@ -736,7 +774,7 @@ class GiveawaysCog(commands.Cog):
         # Обновляем счетчик на эмбеде
         if inter.message and gw["is_active"]:
             try:
-                _, eligible_count = await get_giveaway_counts(required_minutes)
+                total_count, eligible_count = await get_giveaway_counts(required_minutes)
                 prizes = format_prizes_list(gw["prizes"])
                 updated_embed = self._build_giveaway_embed(
                     title=gw["title"],
@@ -744,6 +782,7 @@ class GiveawaysCog(commands.Cog):
                     prizes=prizes,
                     end_time=gw["end_time"],
                     activity_minutes=required_minutes,
+                    total_count=total_count,
                     eligible_count=eligible_count,
                     banner_url=gw["banner_url"],
                 )
